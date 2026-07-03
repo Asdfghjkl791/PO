@@ -58,6 +58,9 @@ HORIZON_MINS      = int(os.environ.get("HORIZON_MINS", "5"))
 SIGNAL_EVERY_MINS = int(os.environ.get("SIGNAL_EVERY_MINS", "1"))
 SIGNAL_LEAD_SECS  = float(os.environ.get("SIGNAL_LEAD_SECS", "5"))
 SIGNAL_MIN_SCORE  = float(os.environ.get("SIGNAL_MIN_SCORE", "0.15"))
+# Signals at/above this |score| get flagged 🔥 STRONG — the "only enter these"
+# tier. Data collection continues on everything above MIN_SCORE regardless.
+SIGNAL_STRONG_SCORE = float(os.environ.get("SIGNAL_STRONG_SCORE", "0.5"))
 PAYOUT_PCT        = float(os.environ.get("PAYOUT_PCT", "0.85"))
 SEND_SKIPS        = os.environ.get("SEND_SKIPS", "true").lower() == "true"
 DB_PATH           = os.environ.get("DB_PATH", "eurusd_signals.db")
@@ -557,6 +560,34 @@ def handle_commands():
                 lines = [f"{n}: {w}/{t} ({w / t * 100:.0f}%)" for n, w, t in rows]
                 tg("🔬 <b>per-feature accuracy</b> (when it voted)\n" + "\n".join(lines) +
                    f"\n\nbreak-even: {BREAK_EVEN * 100:.1f}%")
+        elif text == "/calib":
+            # Does higher confidence actually win more? Buckets every scored
+            # signal by |score| — the empirical answer to "should I only take
+            # the strong ones", straight from your own results.
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("SELECT ABS(score), result FROM signals "
+                      "WHERE result IN ('WIN','LOSS')")
+            rows = c.fetchall()
+            conn.close()
+            if len(rows) < 20:
+                tg(f"only {len(rows)} decided signals — need more for calibration")
+            else:
+                buckets = [(0.15, 0.30), (0.30, 0.45), (0.45, 0.60), (0.60, 1.01)]
+                lines = []
+                for lo, hi in buckets:
+                    sub = [r for s, r in rows if lo <= s < hi]
+                    if not sub:
+                        lines.append(f"{lo:.2f}–{hi:.2f}: no signals")
+                        continue
+                    w = sum(1 for r in sub if r == "WIN")
+                    mark = "✅" if w / len(sub) > BREAK_EVEN else "·"
+                    lines.append(f"{lo:.2f}–{hi:.2f}: {w}/{len(sub)} "
+                                 f"({w / len(sub) * 100:.0f}%) {mark}")
+                tg(f"🎯 <b>win rate by confidence</b> (BE {BREAK_EVEN * 100:.1f}%)\n"
+                   + "\n".join(lines) +
+                   "\n\nflat across buckets = confidence doesn't predict wins;"
+                   "\nrising = set SIGNAL_MIN_SCORE where it crosses BE")
         elif text == "/help":
             tg("🤖 /stats — scoreboard\n/features — per-feature accuracy\n"
                "/pause /resume — signal flow")
@@ -682,6 +713,8 @@ def signal_loop():
                     tg(f"⚪ EUR/USD {t0_str} — mixed signals (score {score:+.2f}) · skip")
             else:
                 arrow = "⬆️" if direction == "UP" else "⬇️"
+                strong = abs(score) >= SIGNAL_STRONG_SCORE
+                tag = "🔥 <b>STRONG</b> · " if strong else ""
                 votes = {k: v["vote"] for k, v in F.items()}
                 rid = db_insert_signal(int(t0), direction, score, F)
                 with pending_lock:
@@ -689,7 +722,7 @@ def signal_loop():
                                     "deadline": t0 + HORIZON_MINS * 60,
                                     "direction": direction, "votes": votes,
                                     "entry_price": None})
-                tg(f"🔮 <b>EUR/USD {arrow} {direction}</b>\n"
+                tg(f"{tag}🔮 <b>EUR/USD {arrow} {direction}</b>\n"
                    f"enter <b>{t0_str} UTC</b> · {HORIZON_MINS}m expiry\n"
                    f"confidence {abs(score) * 100:.0f}% · spot {mid:.5f}\n"
                    f"{fmt_reasons(F)}")
