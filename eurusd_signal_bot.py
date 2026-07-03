@@ -65,9 +65,11 @@ HEARTBEAT_SECS    = int(os.environ.get("HEARTBEAT_SECS", "60"))
 
 BREAK_EVEN = 1.0 / (1.0 + PAYOUT_PCT)  # win-rate needed to profit at this payout
 
-BINANCE_WS_URL = ("wss://stream.binance.com:9443/stream?streams="
+# Binance's PUBLIC market-data domain (binance.vision) — same data as
+# binance.com but not geo-restricted, so it works from any Railway region.
+BINANCE_WS_URL = ("wss://data-stream.binance.vision/stream?streams="
                   "eurusdt@bookTicker/eurusdt@trade")
-BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
+BINANCE_KLINES = "https://data-api.binance.vision/api/v3/klines"
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -166,10 +168,14 @@ def seed_history():
                          params={"symbol": "EURUSDT", "interval": "1m", "limit": 120},
                          timeout=10)
         rows = r.json()
+        if not isinstance(rows, list):
+            raise ValueError(f"unexpected klines response: {str(rows)[:120]}")
         n = 0
         with _data_lock:
             for k in rows:
-                ots = int(k[0] // 1000)
+                if not isinstance(k, (list, tuple)) or len(k) < 5:
+                    continue
+                ots = int(int(k[0]) // 1000)
                 o, h, l, c = float(k[1]), float(k[2]), float(k[3]), float(k[4])
                 _bars[ots] = [o, h, l, c]
                 _ticks.append((ots + 59, c))  # synthetic tick at bar close
